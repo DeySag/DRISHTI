@@ -1,0 +1,17 @@
+pyshark
+scapy
+pandas
+numpy
+torch
+torch-geometric
+pyyaml
+catboost
+shap
+faiss-cpu
+fastapi
+uvicorn
+streamlit
+plotly
+matplotlib
+scikit-learn
+kagglehub

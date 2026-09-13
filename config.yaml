@@ -1,0 +1,10 @@
+pipeline:
+  window_duration: 1.0
+  stride: 1.0
+  port_collapse_threshold: 50
+  robust_zscore_window: 100
+  micro_buffer_timeout: 0.5
+paths:
+  pcap_dir: "data/pcaps"
+  csv_dir: "data/csv"
+  output_dir: "data/processed"
