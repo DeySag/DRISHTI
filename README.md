@@ -1,6 +1,6 @@
-# N-WORLD: Neural World Model for Online Real-Time Lateral Intrusion Detection
+# DRISHTI — Dynamic Risk and Infiltration Sensing via Heuristic Threat Intelligence
 
-**DRISHTI** — A predictive cybersecurity threat intelligence platform that models network dynamics as a "world model," enabling K-step forward simulation of attack trajectories before they materialize.
+A predictive cybersecurity threat intelligence platform that models network dynamics as a "world model," enabling K-step forward simulation of attack trajectories before they materialize.
 
 ---
 
@@ -8,7 +8,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         N-WORLD Pipeline                                    │
+│                         DRISHTI Pipeline                                    │
 │                                                                             │
 │  [Telemetry Ingestion]   [Latent Encoder]   [Transition Engine]  [Oracle]  │
 │  ┌──────────────────┐   ┌──────────────┐   ┌──────────────────┐ ┌────────┐│
@@ -313,8 +313,8 @@ paths:
 ## Citation
 
 ```bibtex
-@article{nworld2026,
-  title={N-WORLD: Neural World Model for Online Real-Time Lateral Intrusion Detection},
+@article{drishti2026,
+  title={DRISHTI: Dynamic Risk and Infiltration Sensing via Heuristic Threat Intelligence},
   author={DRISHTI Team},
   year={2026}
 }

@@ -17,7 +17,7 @@ from latent_encoder.model import LatentGraphEncoder
 from transition_engine.model import CausalTemporalTransformer
 from oracle.model import ExplainableOracle
 
-st.set_page_config(layout="wide", page_title="N-WORLD SOC Glasshouse", initial_sidebar_state="expanded")
+st.set_page_config(layout="wide", page_title="DRISHTI SOC Glasshouse", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
@@ -271,7 +271,7 @@ def generate_alerts(risk_values, mitre_stages, threshold):
 pipeline, encoder, world_model, oracle = load_engines()
 
 with st.sidebar:
-    st.markdown("<h2 style='color:#00d4ff;margin:0;'>N-WORLD</h2>", unsafe_allow_html=True)
+    st.markdown("<h2 style='color:#00d4ff;margin:0;'>DRISHTI</h2>", unsafe_allow_html=True)
     st.markdown("<p style='color:#64748b;font-size:0.75rem;margin:0;'>Predictive Threat Intelligence</p>", unsafe_allow_html=True)
     st.markdown('<div class="scanner-line"></div>', unsafe_allow_html=True)
 
@@ -316,7 +316,7 @@ trigger = (uploaded_file is not None) or (mode == "Live CIC-IDS Demo") or (mode 
 if not trigger:
     st.markdown("""
     <div style="text-align:center;padding:4rem 0;">
-        <h1 style="font-size:3rem;margin-bottom:0.5rem;">N-WORLD SOC</h1>
+        <h1 style="font-size:3rem;margin-bottom:0.5rem;">DRISHTI SOC</h1>
         <p style="color:#64748b;font-size:1.1rem;margin-bottom:2rem;">Predictive Threat Intelligence Platform</p>
         <div style="display:inline-block;background:linear-gradient(135deg,#1a2332,#0f172a);border:1px solid #1e3a5f;border-radius:16px;padding:2rem 3rem;max-width:700px;text-align:left;">
             <p style="color:#00d4ff;font-weight:700;font-size:0.9rem;margin-bottom:1rem;">PIPELINE ARCHITECTURE</p>

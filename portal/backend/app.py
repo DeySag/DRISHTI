@@ -13,7 +13,7 @@ from latent_encoder.model import LatentGraphEncoder
 from transition_engine.model import CausalTemporalTransformer
 from oracle.model import ExplainableOracle
 
-app = FastAPI(title="N-WORLD SOC Portal API")
+app = FastAPI(title="DRISHTI SOC Portal API")
 
 pipeline = TelemetryPipeline(window_duration=1.0)
 encoder = LatentGraphEncoder(node_dim=4, edge_dim=8, hidden_dim=16, latent_dim=8, heads=2)
