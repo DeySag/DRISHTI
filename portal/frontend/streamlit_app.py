@@ -10,6 +10,7 @@ from plotly.subplots import make_subplots
 import torch
 import numpy as np
 import time
+import json
 from datetime import datetime
 
 from telemetry.pipeline import TelemetryPipeline
@@ -159,7 +160,7 @@ div[data-testid="stMetric"] {
 
 
 def load_engines():
-    pipe = TelemetryPipeline(window_duration=60.0)
+    pipe = TelemetryPipeline(window_duration=5.0)
     enc = LatentGraphEncoder(node_dim=4, edge_dim=8, hidden_dim=16, latent_dim=8, heads=2)
     enc.classifier = torch.nn.Linear(8, 1)
     wm = CausalTemporalTransformer(latent_dim=8, num_heads=2, num_layers=2, hidden_dim=32)
@@ -276,14 +277,18 @@ with st.sidebar:
     st.markdown('<div class="scanner-line"></div>', unsafe_allow_html=True)
 
     st.markdown("**Data Source**")
-    mode = st.radio("Input", ["Live CIC-IDS Demo", "Upload PCAP/CSV", "Pull Loop Live"], index=0, label_visibility="collapsed")
+    mode = st.radio("Input", ["Real-Time Simulator", "Live CIC-IDS Demo", "Upload PCAP/CSV", "Pull Loop Live"], index=0, label_visibility="collapsed")
 
     uploaded_file = None
     live_rows = 5000
+    auto_refresh = False
     if mode == "Upload PCAP/CSV":
         uploaded_file = st.file_uploader("Upload file", type=["csv", "pcap"])
     elif mode == "Live CIC-IDS Demo":
         live_rows = st.slider("Sample rows", 2000, 30000, 10000, step=1000)
+    elif mode == "Real-Time Simulator":
+        st.info("Run `python scripts/live_simulator.py` in a terminal to start the feed.")
+        auto_refresh = st.checkbox("Auto-refresh (3s)", value=True)
 
     st.markdown('<div class="scanner-line"></div>', unsafe_allow_html=True)
     st.markdown("**Simulation Parameters**")
@@ -311,7 +316,7 @@ with st.sidebar:
             time.sleep(10)
             st.rerun()
 
-trigger = (uploaded_file is not None) or (mode == "Live CIC-IDS Demo") or (mode == "Pull Loop Live")
+trigger = (uploaded_file is not None) or (mode == "Live CIC-IDS Demo") or (mode == "Pull Loop Live") or (mode == "Real-Time Simulator")
 
 if not trigger:
     st.markdown("""
@@ -335,13 +340,14 @@ if not trigger:
     """, unsafe_allow_html=True)
 else:
     with st.spinner("Initializing World Model causal simulation..."):
+        _feed_loaded = False
         graphs = None
         flows_df = None
         raw_records = []
 
         if mode == "Live CIC-IDS Demo":
             from telemetry.cic_adapter import load_all_cic
-            flows_df = load_all_cic(window_duration=60.0, nrows_per_file=live_rows, max_files=2, global_reindex=True)
+            flows_df = load_all_cic(window_duration=5.0, nrows_per_file=live_rows, max_files=2, global_reindex=True)
             from telemetry.graph_builder import build_windowed_graphs
             graphs = build_windowed_graphs(flows_df.drop(columns=["label", "timestamp", "source_file"], errors="ignore"))
         elif uploaded_file is not None:
@@ -362,7 +368,31 @@ else:
                 st.error(f"Parse error: {e}")
             finally:
                 os.unlink(tmp_path)
+        elif mode == "Real-Time Simulator":
+            feed_path = Path("data/live_feed.json")
+            if feed_path.exists():
+                feed = json.loads(feed_path.read_text())
+                st.success(f"Live feed active: tick {feed['tick']}, phase={feed['phase']}, risk={feed['mean_risk']:.2f}")
+
+                graphs = None
+                flows_df = None
+
+                risk_vals = feed.get("risk_timeline", [])
+                mitre_labels = feed.get("mitre_stages", [])
+                fore_np = np.array(feed.get("forecast_np", []))
+                attr_arr = np.array(feed.get("shap_values", []))
+                mean_risk = feed.get("mean_risk", 0)
+                max_risk = feed.get("max_risk", 0)
+                n_windows = feed.get("total_flows", 0)
+                attack_type = feed.get("phase", "Normal")
+                k_steps = feed.get("k_steps", 10)
+
+                _feed_loaded = True
+            else:
+                st.warning("No live feed found. Run `python scripts/live_simulator.py` in a terminal.")
+                _feed_loaded = False
         elif mode == "Pull Loop Live":
+            _feed_loaded = False
             lp = Path("data/pull_logs.csv")
             if lp.exists():
                 log_df = pd.read_csv(lp)
@@ -373,7 +403,292 @@ else:
             else:
                 st.warning("No pull logs found. Run `python scripts/pull_loop.py --loop` first.")
 
-        if graphs and len(graphs) > 0:
+        if _feed_loaded:
+            if isinstance(mitre_labels[0], int):
+                mitre_labels = [list(MITRE_MATRIX.keys())[m % len(MITRE_MATRIX)] for m in mitre_labels]
+            alerts = generate_alerts(risk_vals, mitre_labels, threshold)
+            critical_count = sum(1 for a in alerts if a["severity"] == "CRITICAL")
+            high_count = sum(1 for a in alerts if a["severity"] == "HIGH")
+
+            current_phase_name = feed.get("phase", "Normal")
+            current_risk_val = feed.get("current_risk", mean_risk)
+            tick_num = feed.get("tick", 0)
+            active_flows = feed.get("active_flows", [])
+            total_flows = feed.get("total_flows", 0)
+            nodes_seen = feed.get("nodes_seen", 0)
+            ts_str = feed.get("timestamp", "")
+
+            phase_colors = {
+                "Normal": "#10b981", "Reconnaissance": "#3b82f6",
+                "Escalation": "#f97316", "Lateral Movement": "#ef4444",
+                "Exfiltration": "#dc2626", "Recovery": "#06b6d4",
+            }
+            phase_color = phase_colors.get(current_phase_name, "#64748b")
+            severity_colors = {"LOW": "#10b981", "MEDIUM": "#f59e0b", "HIGH": "#f97316", "CRITICAL": "#ef4444"}
+            sev_color = severity_colors.get(severity, "#10b981")
+
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg, #1a2332 0%, #0f172a 100%);border:1px solid {phase_color};border-radius:12px;padding:1rem 1.5rem;margin-bottom:1rem;display:flex;align-items:center;justify-content:space-between;box-shadow:0 0 20px {phase_color}30;">
+                <div>
+                    <span style="color:#64748b;font-size:0.75rem;text-transform:uppercase;letter-spacing:0.1em;">LIVE SIMULATION</span>
+                    <h2 style="color:{phase_color};margin:0;font-size:1.8rem;">{current_phase_name}</h2>
+                    <span style="color:#64748b;font-size:0.8rem;">Tick {tick_num} &middot; {ts_str[:19]}</span>
+                </div>
+                <div style="text-align:right;">
+                    <div style="font-size:0.7rem;color:#64748b;text-transform:uppercase;letter-spacing:0.1em;">THREAT LEVEL</div>
+                    <div style="font-size:2.2rem;font-weight:700;color:{sev_color};font-family:'JetBrains Mono',monospace;">{mean_risk:.1%}</div>
+                    <div style="background:{sev_color};color:#0a0e17;padding:2px 12px;border-radius:12px;font-size:0.7rem;font-weight:700;display:inline-block;">{severity}</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            col_gauge, col_stats = st.columns([1, 2])
+
+            with col_gauge:
+                gauge_fig = go.Figure(go.Indicator(
+                    mode="gauge+number+delta",
+                    value=mean_risk * 100,
+                    number={"suffix": "%", "font": {"size": 28, "color": sev_color, "family": "JetBrains Mono"}},
+                    delta={"reference": 50, "increasing": {"color": "#ef4444"}, "decreasing": {"color": "#10b981"}},
+                    gauge={
+                        "axis": {"range": [0, 100], "tickcolor": "#64748b"},
+                        "bar": {"color": sev_color},
+                        "bgcolor": "rgba(0,0,0,0)",
+                        "borderwidth": 0,
+                        "steps": [
+                            {"range": [0, 30], "color": "rgba(16,185,129,0.15)"},
+                            {"range": [30, 50], "color": "rgba(245,158,11,0.15)"},
+                            {"range": [50, 70], "color": "rgba(249,115,22,0.15)"},
+                            {"range": [70, 100], "color": "rgba(239,68,68,0.15)"},
+                        ],
+                        "threshold": {"line": {"color": "#ef4444", "width": 3}, "thickness": 0.8, "value": 70},
+                    },
+                ))
+                gauge_fig.update_layout(height=260, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                        font=dict(color="#e2e8f0"), margin=dict(l=30, r=30, t=20, b=10))
+                st.plotly_chart(gauge_fig, use_container_width=True)
+
+            with col_stats:
+                s1, s2, s3, s4 = st.columns(4)
+                with s1:
+                    st.markdown(f"""<div class="metric-card"><div class="metric-label">TICK</div>
+                        <div class="metric-value" style="font-size:1.5rem;">{tick_num}</div></div>""", unsafe_allow_html=True)
+                with s2:
+                    st.markdown(f"""<div class="metric-card"><div class="metric-label">ACTIVE FLOWS</div>
+                        <div class="metric-value" style="font-size:1.5rem;">{total_flows}</div></div>""", unsafe_allow_html=True)
+                with s3:
+                    st.markdown(f"""<div class="metric-card"><div class="metric-label">NODES</div>
+                        <div class="metric-value" style="font-size:1.5rem;">{nodes_seen}</div></div>""", unsafe_allow_html=True)
+                with s4:
+                    st.markdown(f"""<div class="metric-card"><div class="metric-label">ALERTS</div>
+                        <div class="metric-value" style="font-size:1.5rem;color:{'#ef4444' if critical_count > 0 else '#f97316' if high_count > 0 else '#10b981'};">{critical_count + high_count}</div></div>""", unsafe_allow_html=True)
+
+                phase_order = ["Normal", "Reconnaissance", "Escalation", "Lateral Movement", "Exfiltration", "Recovery"]
+                phase_html = ""
+                for pname in phase_order:
+                    pc = phase_colors.get(pname, "#64748b")
+                    is_active = pname == current_phase_name
+                    border = f"2px solid {pc}" if is_active else "1px solid #1e3a5f"
+                    glow = f"box-shadow:0 0 12px {pc}50;" if is_active else ""
+                    dot = f'<span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:{pc};margin-right:6px;{'animation:pulse 1.5s infinite;' if is_active else ''}"></span>'
+                    opacity = "1" if is_active else "0.5"
+                    phase_html += f'<span style="opacity:{opacity};border:{border};border-radius:6px;padding:4px 10px;font-size:0.7rem;color:{pc};font-weight:700;{glow}">{dot}{pname}</span> '
+                st.markdown(f'<div style="margin-top:8px;">{phase_html}</div>', unsafe_allow_html=True)
+
+            st.markdown('<div class="scanner-line"></div>', unsafe_allow_html=True)
+
+            tab_live1, tab_live2, tab_live3, tab_live4 = st.tabs([
+                " Risk Timeline", " Network Topology", " XAI Explainability", " Alert Center"
+            ])
+
+            with tab_live1:
+                history_path = Path("data/live_history.json")
+                risk_ts_fig = go.Figure()
+                if history_path.exists():
+                    try:
+                        hist_data = json.loads(history_path.read_text())
+                    except Exception:
+                        hist_data = []
+                    if hist_data:
+                        hist_ticks = [h["tick"] for h in hist_data]
+                        hist_risks = [h["mean_risk"] for h in hist_data]
+                        hist_phases = [h.get("phase", "Normal") for h in hist_data]
+                        hist_colors = [phase_colors.get(p, "#64748b") for p in hist_phases]
+                        risk_ts_fig.add_trace(go.Scatter(
+                            x=hist_ticks, y=hist_risks, mode="lines+markers",
+                            name="Risk", line=dict(color="#00d4ff", width=2),
+                            marker=dict(size=5, color=hist_colors),
+                            fill="tozeroy", fillcolor="rgba(0,212,255,0.08)",
+                        ))
+                risk_ts_fig.add_hline(y=threshold, line_dash="dot", line_color="#ef4444",
+                                      annotation_text=f"Threshold {threshold:.0%}", annotation_font_color="#ef4444")
+                risk_ts_fig.update_layout(
+                    height=320, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#e2e8f0"),
+                    xaxis=dict(title="Tick", gridcolor="#1e3a5f", zeroline=False),
+                    yaxis=dict(title="Risk", gridcolor="#1e3a5f", range=[0, 1]),
+                    showlegend=False, margin=dict(l=0, r=0, t=10, b=0),
+                )
+                st.plotly_chart(risk_ts_fig, use_container_width=True)
+
+                fc1, fc2 = st.columns(2)
+                with fc1:
+                    st.markdown("**Forecast Trajectory**")
+                    forecast_fig = go.Figure()
+                    forecast_fig.add_trace(go.Scatter(
+                        x=list(range(len(risk_vals))), y=risk_vals,
+                        mode="lines+markers", name="Forecast",
+                        line=dict(color="#7c3aed", width=2), marker=dict(size=4),
+                        fill="tozeroy", fillcolor="rgba(124,58,237,0.1)",
+                    ))
+                    forecast_fig.add_hline(y=threshold, line_dash="dot", line_color="#ef4444")
+                    forecast_fig.update_layout(height=250, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                              font=dict(color="#e2e8f0"), margin=dict(l=0, r=0, t=10, b=0),
+                                              xaxis=dict(gridcolor="#1e3a5f", title="Step"),
+                                              yaxis=dict(gridcolor="#1e3a5f", title="Risk", range=[0, 1]))
+                    st.plotly_chart(forecast_fig, use_container_width=True)
+                with fc2:
+                    st.markdown("**Risk Distribution**")
+                    risk_hist_fig = go.Figure(go.Histogram(x=risk_vals, nbinsx=15, marker_color="#7c3aed", opacity=0.8))
+                    risk_hist_fig.add_vline(x=threshold, line_dash="dot", line_color="#ef4444")
+                    risk_hist_fig.update_layout(height=250, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                               font=dict(color="#e2e8f0"), margin=dict(l=0, r=0, t=10, b=0),
+                                               xaxis=dict(gridcolor="#1e3a5f", title="Risk"),
+                                               yaxis=dict(gridcolor="#1e3a5f", title="Count"))
+                    st.plotly_chart(risk_hist_fig, use_container_width=True)
+
+                st.markdown("**MITRE ATT&CK Kill Chain**")
+                render_mitre_matrix(current_phase_name)
+
+            with tab_live2:
+                st.markdown("**Live Network Topology**")
+                flow_records = []
+                for af in active_flows:
+                    flow_records.append({
+                        "src_ip": af.get("src", "10.0.0.1"),
+                        "dst_ip": af.get("dst", "10.0.0.2"),
+                        "total_bytes": af.get("bytes", 0),
+                        "total_packets": 1,
+                    })
+                if not flow_records:
+                    for i in range(10):
+                        flow_records.append({"src_ip": f"192.168.1.{10+i}", "dst_ip": "10.0.0.1",
+                                             "total_bytes": np.random.randint(100, 1500), "total_packets": 1})
+
+                risk_per_node = {}
+                for i, r in enumerate(flow_records):
+                    src, dst = r["src_ip"], r["dst_ip"]
+                    rv = risk_vals[i % len(risk_vals)] if risk_vals else 0.1
+                    risk_per_node[src] = risk_per_node.get(src, 0) + rv
+                    risk_per_node[dst] = risk_per_node.get(dst, 0) + rv
+                max_rn = max(risk_per_node.values()) if risk_per_node else 1
+                risk_per_node = {k: v / max_rn for k, v in risk_per_node.items()}
+
+                net_fig = build_network_figure(flow_records, risk_per_node, 0)
+                st.plotly_chart(net_fig, use_container_width=True)
+
+                nc1, nc2 = st.columns(2)
+                with nc1:
+                    st.markdown("**Flow Volume**")
+                    vol_fig = go.Figure(go.Bar(
+                        x=list(range(min(20, len(flow_records)))),
+                        y=[r["total_bytes"] for r in flow_records[:20]],
+                        marker_color="#00d4ff",
+                    ))
+                    vol_fig.update_layout(height=230, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                          font=dict(color="#e2e8f0"), margin=dict(l=0, r=0, t=10, b=0),
+                                          xaxis=dict(gridcolor="#1e3a5f", title="Flow"),
+                                          yaxis=dict(gridcolor="#1e3a5f", title="Bytes"))
+                    st.plotly_chart(vol_fig, use_container_width=True)
+                with nc2:
+                    st.markdown("**Node Risk Heatmap**")
+                    top_nodes = sorted(risk_per_node.items(), key=lambda x: x[1], reverse=True)[:10]
+                    if top_nodes:
+                        heat_fig = go.Figure(go.Bar(
+                            x=[n[1] for n in top_nodes], y=[n[0] for n in top_nodes], orientation="h",
+                            marker_color=[f"rgb({min(255,int(n[1]*255))},{max(0,int((1-n[1])*200))},50)" for n in top_nodes]
+                        ))
+                        heat_fig.update_layout(height=230, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                              font=dict(color="#e2e8f0"), margin=dict(l=0, r=0, t=10, b=0),
+                                              xaxis=dict(gridcolor="#1e3a5f", title="Risk"),
+                                              yaxis=dict(gridcolor="#1e3a5f"))
+                        st.plotly_chart(heat_fig, use_container_width=True)
+
+            with tab_live3:
+                st.markdown("**Root Cause Analysis (SHAP Waterfall)**")
+                st.markdown("Feature contributions to risk prediction.")
+                dim_names = ["out_bytes", "out_degree", "in_bytes", "in_degree", "iat_mean", "iat_var", "ack_ratio", "syn_ratio"]
+                if hasattr(attr_arr, 'shape') and len(attr_arr.shape) >= 2:
+                    attr_t = attr_arr[-1] if len(attr_arr) > 0 else np.zeros(8)
+                else:
+                    attr_t = np.array(attr_arr).flatten()[:8] if len(np.array(attr_arr).flatten()) >= 8 else np.zeros(8)
+                attr_t = np.array(attr_t).flatten()[:8]
+
+                shap_fig = go.Figure(go.Bar(
+                    x=attr_t, y=dim_names[:len(attr_t)], orientation="h",
+                    marker_color=["#ef4444" if v > 0 else "#10b981" for v in attr_t]
+                ))
+                shap_fig.update_layout(height=350, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                       font=dict(color="#e2e8f0"), margin=dict(l=0, r=0, t=10, b=0),
+                                       xaxis=dict(gridcolor="#1e3a5f", title="SHAP Value"),
+                                       yaxis=dict(gridcolor="#1e3a5f"))
+                st.plotly_chart(shap_fig, use_container_width=True)
+
+                st.markdown("**Latent State Heatmap**")
+                if hasattr(fore_np, 'shape') and len(fore_np.shape) == 2:
+                    heatmap_fig = go.Figure(go.Heatmap(
+                        z=fore_np.T, colorscale="Viridis",
+                        x=[f"T+{i}" for i in range(fore_np.shape[0])],
+                        y=[f"z_{i}" for i in range(fore_np.shape[1])]
+                    ))
+                    heatmap_fig.update_layout(height=280, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                              font=dict(color="#e2e8f0"), margin=dict(l=0, r=0, t=10, b=0))
+                    st.plotly_chart(heatmap_fig, use_container_width=True)
+
+                st.markdown("**Feature Importance Ranking**")
+                imp = np.abs(attr_t)
+                imp_sorted = np.argsort(imp)[::-1]
+                imp_fig = go.Figure(go.Bar(
+                    x=[imp[i] for i in imp_sorted], y=[dim_names[i] for i in imp_sorted[:len(attr_t)]],
+                    orientation="h", marker_color="#7c3aed"
+                ))
+                imp_fig.update_layout(height=250, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                                      font=dict(color="#e2e8f0"), margin=dict(l=0, r=0, t=10, b=0),
+                                      xaxis=dict(gridcolor="#1e3a5f"), yaxis=dict(gridcolor="#1e3a5f"))
+                st.plotly_chart(imp_fig, use_container_width=True)
+
+            with tab_live4:
+                st.markdown("**Alert Center**")
+                if critical_count > 0:
+                    st.error(f"**{critical_count} CRITICAL alerts** detected in forecast window")
+                if high_count > 0:
+                    st.warning(f"**{high_count} HIGH severity** alerts require attention")
+
+                for alert in alerts[:15]:
+                    sev = alert["severity"]
+                    color = alert["color"]
+                    st.markdown(f"""
+                    <div class="alert-box alert-{sev.lower()}" style="display:flex;align-items:center;gap:12px;">
+                        <div style="background:{color};color:white;padding:2px 8px;border-radius:4px;font-size:0.7rem;font-weight:700;font-family:'JetBrains Mono';min-width:70px;text-align:center;">{sev}</div>
+                        <div style="flex:1;">
+                            <div style="font-size:0.85rem;color:#e2e8f0;">{alert['message']}</div>
+                            <div style="font-size:0.7rem;color:#64748b;">T+{alert['time']} | {datetime.now().strftime('%H:%M:%S')}</div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                st.markdown("---")
+                st.markdown("**Forecast Summary**")
+                summary_df = pd.DataFrame({
+                    "Step": list(range(len(risk_vals))),
+                    "Risk": [f"{r:.3f}" for r in risk_vals],
+                    "Severity": ["CRITICAL" if r > threshold else "HIGH" if r > threshold * 0.8 else "MEDIUM" if r > threshold * 0.5 else "LOW" for r in risk_vals],
+                    "MITRE Stage": mitre_labels[:len(risk_vals)],
+                    "Status": ["ALERT" if r > threshold else "MONITOR" if r > threshold * 0.8 else "OK" for r in risk_vals]
+                })
+                st.dataframe(summary_df, use_container_width=True, hide_index=True)
+
+        elif graphs and len(graphs) > 0:
             encoder.eval()
             world_model.eval()
             seq = []
@@ -391,11 +706,10 @@ else:
                 fore = world_model.rollout(Z + noise, k_steps=k_steps)
 
             fore_np = fore.detach().cpu().numpy().reshape(-1, 8)
-            timeline_df = oracle.generate_risk_timeline(hist_np, fore_np)
 
             risk_arr, mitre_arr, attr_arr = oracle.decode_trajectory(fore_np)
             risk_vals = risk_arr.tolist() if hasattr(risk_arr, 'tolist') else list(risk_arr)
-            mitre_labels = [MITRE_MATRIX.keys().__iter__().__next__()] * len(risk_vals)
+            mitre_labels = [list(MITRE_MATRIX.keys())[0]] * len(risk_vals)
             if isinstance(mitre_arr, np.ndarray) and mitre_arr.dtype.kind in ('i', 'f', 'U'):
                 mitre_labels = [list(MITRE_MATRIX.keys())[int(m) % len(MITRE_MATRIX)] if isinstance(m, (int, float, np.integer)) else str(m) for m in mitre_arr]
 
@@ -614,3 +928,7 @@ else:
                 st.dataframe(log_df.tail(20), use_container_width=True, hide_index=True)
             else:
                 st.info("Run `python scripts/pull_loop.py --loop --interval 30` in a terminal to generate live data.")
+
+    if mode == "Real-Time Simulator" and auto_refresh:
+        time.sleep(3)
+        st.rerun()

@@ -19,7 +19,7 @@ encoder.eval()
 print(f"Encoder loaded from checkpoints/encoder.pt")
 
 print("\n=== Loading CIC data ===")
-flows = load_all_cic(window_duration=60.0, nrows_per_file=10000, max_files=2, global_reindex=True)
+flows = load_all_cic(window_duration=5.0, nrows_per_file=10000, max_files=2, global_reindex=True)
 print(f"Total flows {len(flows)}, windows {flows['window_idx'].nunique()}")
 
 graphs = build_windowed_graphs(flows.drop(columns=["label", "timestamp", "source_file"], errors="ignore"))

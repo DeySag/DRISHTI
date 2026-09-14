@@ -1,5 +1,5 @@
 pipeline:
-  window_duration: 1.0
+  window_duration: 5.0
   stride: 1.0
   port_collapse_threshold: 50
   robust_zscore_window: 100

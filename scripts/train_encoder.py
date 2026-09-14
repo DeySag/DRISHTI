@@ -11,7 +11,7 @@ from telemetry.cic_adapter import load_all_cic
 from telemetry.graph_builder import build_windowed_graphs
 
 print("=== PHASE 1: Self-Supervised Encoder Pretraining (DGI per window) ===")
-flows = load_all_cic(window_duration=60.0, nrows_per_file=10000, max_files=2, global_reindex=True)
+flows = load_all_cic(window_duration=5.0, nrows_per_file=10000, max_files=2, global_reindex=True)
 print(f"Total flows {len(flows)}, windows {flows['window_idx'].nunique()}")
 
 graphs = build_windowed_graphs(flows.drop(columns=["label", "timestamp", "source_file"], errors="ignore"))
@@ -39,7 +39,8 @@ for wid in sorted(graphs.keys()):
 
 print(f"Usable windows (nodes>=2): {len(window_data)}")
 
-# Phase 1: DGI per-window (no batching needed)
+# Phase 1: DGI per-window (mini-batched for speed)
+BATCH_SIZE = 32
 optimizer = torch.optim.Adam(encoder.parameters(), lr=5e-4)
 
 print("\nTraining DGI (self-supervised)...")
@@ -48,38 +49,34 @@ for epoch in range(100):
     total_loss = 0.0
     count = 0
     np.random.shuffle(window_data)
-    for X, Ei, Ea, label in window_data:
-        batch = torch.zeros(X.size(0), dtype=torch.long)
-        # DGI-style: corruption via random permutation
-        perm = torch.randperm(X.size(0))
-        X_corrupt = X[perm]
-
-        z_real = encoder(X, Ei, Ea, batch)
-        z_corrupt = encoder(X_corrupt, Ei, Ea, batch)
-
-        # Contrastive: real should be close to itself, corrupt should be far
-        pos_sim = F.cosine_similarity(z_real, z_real, dim=1)
-        neg_sim = F.cosine_similarity(z_real, z_corrupt, dim=1)
-
-        dgi_loss = -torch.mean(torch.log(torch.sigmoid(pos_sim) + 1e-8) +
-                               torch.log(1 - torch.sigmoid(neg_sim) + 1e-8))
-
-        # Attention regularization
-        att_reg = capped_attention_regularizer(None)
-
-        loss = dgi_loss + 0.01 * att_reg
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        total_loss += loss.item()
-        count += 1
+    for i in range(0, len(window_data), BATCH_SIZE):
+        batch_data = window_data[i:i+BATCH_SIZE]
+        batch_loss = 0.0
+        for X, Ei, Ea, label in batch_data:
+            batch = torch.zeros(X.size(0), dtype=torch.long)
+            perm = torch.randperm(X.size(0))
+            X_corrupt = X[perm]
+            z_real = encoder(X, Ei, Ea, batch)
+            z_corrupt = encoder(X_corrupt, Ei, Ea, batch)
+            pos_sim = F.cosine_similarity(z_real, z_real, dim=1)
+            neg_sim = F.cosine_similarity(z_real, z_corrupt, dim=1)
+            dgi_loss = -torch.mean(torch.log(torch.sigmoid(pos_sim) + 1e-8) +
+                                   torch.log(1 - torch.sigmoid(neg_sim) + 1e-8))
+            att_reg = capped_attention_regularizer(None)
+            loss = dgi_loss + 0.01 * att_reg
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            batch_loss += loss.item()
+            count += 1
+        total_loss += batch_loss
 
     if epoch % 10 == 0:
         print(f"  Epoch {epoch}: DGI loss = {total_loss/count:.4f}")
 
 print(f"  Final DGI loss: {total_loss/count:.4f}")
 
-# Phase 2: Supervised fine-tuning
+# Phase 2: Supervised fine-tuning (mini-batched)
 print("\n=== PHASE 2: Supervised Fine-Tuning ===")
 optimizer_sup = torch.optim.Adam(encoder.parameters(), lr=1e-4)
 
@@ -88,21 +85,23 @@ for epoch in range(50):
     correct = 0
     total = 0
     np.random.shuffle(window_data)
-    for X, Ei, Ea, label in window_data:
-        batch = torch.zeros(X.size(0), dtype=torch.long)
-        z = encoder(X, Ei, Ea, batch)
-        target = torch.tensor(label, dtype=torch.float).unsqueeze(0)
-        pred = encoder.classifier(z).squeeze(0)
-        loss = F.binary_cross_entropy_with_logits(pred, target)
+    for i in range(0, len(window_data), BATCH_SIZE):
+        batch_data = window_data[i:i+BATCH_SIZE]
+        for X, Ei, Ea, label in batch_data:
+            batch = torch.zeros(X.size(0), dtype=torch.long)
+            z = encoder(X, Ei, Ea, batch)
+            target = torch.tensor(label, dtype=torch.float).unsqueeze(0)
+            pred = encoder.classifier(z).squeeze(0)
+            loss = F.binary_cross_entropy_with_logits(pred, target)
 
-        optimizer_sup.zero_grad()
-        loss.backward()
-        optimizer_sup.step()
-        total_loss += loss.item()
+            optimizer_sup.zero_grad()
+            loss.backward()
+            optimizer_sup.step()
+            total_loss += loss.item()
 
-        pred_label = (pred > 0).float().item()
-        correct += int(pred_label == label)
-        total += 1
+            pred_label = (pred > 0).float().item()
+            correct += int(pred_label == label)
+            total += 1
 
     if epoch % 10 == 0:
         print(f"  Epoch {epoch}: sup loss = {total_loss/total:.4f}, acc = {correct}/{total} ({correct/total*100:.1f}%)")

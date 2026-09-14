@@ -12,7 +12,7 @@ from transition_engine.model import CausalTemporalTransformer
 from oracle.model import ExplainableOracle
 
 print("Loading CIC flows...")
-flows = load_all_cic(window_duration=60.0, nrows_per_file=15000, max_files=2)
+flows = load_all_cic(window_duration=5.0, nrows_per_file=15000, max_files=2)
 print(f"Total flows {len(flows)}, windows {flows['window_idx'].nunique()}")
 
 # Build graphs per window

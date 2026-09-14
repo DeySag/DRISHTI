@@ -14,7 +14,7 @@ import numpy as np
 
 DATA_DIR = CACHE_ROOT
 CHECKPOINT = Path("checkpoints")
-WINDOW = 60.0
+WINDOW = 5.0
 K_STEPS = 5
 LOG_PATH = Path("data/pull_logs.csv")
 
